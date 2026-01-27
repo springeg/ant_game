@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Seeker vs Molecules</title>
+	<style>
+		:root{
+			--ui-font: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Helvetica Neue", Helvetica, sans-serif;
+		}
+		body{
+			font-family: var(--ui-font);
+			margin: 0;
+			padding: 16px;
+			background: #ffffff;
+			color: #111;
+		}
+
+		#wrap{
+			max-width: 1100px;
+			margin: 0 auto;
+			display: grid;
+			gap: 14px;
+		}
+
+		/* Top row: field + buttons (never overlap) */
+		#fieldWrap{
+			display: grid;
+			grid-template-columns: 1fr 200px; /* right column reserved for buttons */
+			gap: 16px;
+			align-items: start;
+			justify-content: start;
+		}
+
+		#canvasWrap{
+			width: 100%;
+		}
+
+		/* Canvas is responsive and keeps square aspect */
+		canvas{
+			display: block;
+			width: 100%;
+			max-width: 760px;
+			aspect-ratio: 1 / 1;
+			height: auto;
+			background: transparent;
+			touch-action: none;
+		}
+
+		#buttonBar{
+			display: grid;
+			gap: 10px;
+			align-content: start;
+			justify-items: stretch;
+		}
+
+		.btn{
+			font-family: var(--ui-font);
+			font-size: 16px;
+			padding: 10px 12px;
+			border: 2px solid #222;
+			background: #fff;
+			cursor: pointer;
+			width: 100%;
+		}
+		.btn:active{ transform: translateY(1px); }
+
+		/* Controls */
+		#controls{
+			display: grid;
+			gap: 8px;
+			max-width: 900px;
+		}
+		.controlRow{ display: grid; gap: 2px; }
+		.labelRow{
+			display: flex;
+			justify-content: space-between;
+			align-items: baseline;
+			gap: 10px;
+		}
+		.labelRow .name{ font-size: 18px; }
+		.labelRow .val{ font-size: 18px; color: #333; }
+		input[type="range"]{ width: 100%; }
+		.smallNote{ font-size: 12px; color: #444; line-height: 1.3; }
+
+		/* Small screens: stack buttons below the field so nothing crowds */
+		@media (max-width: 860px){
+			body{ padding: 12px; }
+			#fieldWrap{
+				grid-template-columns: 1fr;
+			}
+			#buttonBar{
+				grid-auto-flow: column;
+				grid-auto-columns: 1fr;
+				justify-items: stretch;
+			}
+			.btn{ font-size: 14px; padding: 8px 10px; }
+		}
+	</style>
+</head>
+<body>
+	<div id="wrap">
+		<div id="fieldWrap">
+			<div id="canvasWrap">
+				<canvas id="c" width="900" height="900" aria-label="Game field" role="img"></canvas>
+			</div>
+
+			<div id="buttonBar">
+				<button class="btn" id="reset">Reset</button>
+				<button class="btn" id="play">Play / Pause</button>
+				<button class="btn" id="ff">Fast‑Forward ×10</button>
+			</div>
+		</div>
+
+		<div id="controls">
+			<div class="controlRow">
+				<div class="labelRow"><div class="name">Detection Range (Rᴅ)</div><div class="val" id="rdVal"></div></div>
+				<input id="rd" type="range" min="5" max="50" step="1" value="40" />
+			</div>
+
+			<div class="controlRow">
+				<div class="labelRow"><div class="name">Seeker Heat (Hᵣ)</div><div class="val" id="hsVal"></div></div>
+				<input id="hs" type="range" min="1" max="20" step="0.1" value="8" />
+			</div>
+
+			<div class="controlRow">
+				<div class="labelRow"><div class="name">Molecule Heat (H<sub>M</sub>)</div><div class="val" id="hmVal"></div></div>
+				<input id="hm" type="range" min="1" max="20" step="0.1" value="6" />
+			</div>
+
+			<div class="controlRow">
+				<div class="labelRow"><div class="name">Release Rate (per second)</div><div class="val" id="rrVal"></div></div>
+				<input id="rr" type="range" min="0.5" max="3" step="0.1" value="1.2" />
+			</div>
+
+			<div class="controlRow">
+				<div class="labelRow"><div class="name">Attraction to Molecules (G)</div><div class="val" id="gVal"></div></div>
+				<input id="g" type="range" min="0" max="5" step="0.1" value="2.5" />
+			</div>
+
+			<div class="controlRow">
+				<div class="labelRow"><div class="name">Blue-dot detect multiplier (k×Rᴅ)</div><div class="val" id="bdVal"></div></div>
+				<input id="bd" type="range" min="1" max="5" step="0.1" value="2" />
+				<div class="smallNote">Seeker senses the center (blue dot) out to k×Rᴅ; attraction magnitude scales with distance² within that range.</div>
+			</div>
+
+			<div class="controlRow">
+				<div class="labelRow"><div class="name">Field Size</div><div class="val" id="fsVal"></div></div>
+				<input id="fs" type="range" min="100" max="1000" step="10" value="700" />
+			</div>
+
+			<div class="controlRow">
+				<div class="labelRow"><div class="name">Step Time (ms)</div><div class="val" id="stVal"></div></div>
+				<input id="st" type="range" min="50" max="1000" step="25" value="300" />
+				<div class="smallNote">Click inside the circle to place the Seeker. WIN when it reaches the blue dot (within FieldSize/50). Fast-forward runs at 10× faster than the minimum Step Time.</div>
+			</div>
+		</div>
+	</div>
+
+	<script>
+		(() => {
+			const canvas = document.getElementById('c');
+			const ctx = canvas.getContext('2d');
+			const MIN_STEP_MS = 50; // must match Step Time slider min
+
+			const ui = {
+				rd: document.getElementById('rd'),
+				hs: document.getElementById('hs'),
+				hm: document.getElementById('hm'),
+				rr: document.getElementById('rr'),
+				g: document.getElementById('g'),
+				bd: document.getElementById('bd'),
+				fs: document.getElementById('fs'),
+				st: document.getElementById('st'),
+
+				rdVal: document.getElementById('rdVal'),
+				hsVal: document.getElementById('hsVal'),
+				hmVal: document.getElementById('hmVal'),
+				rrVal: document.getElementById('rrVal'),
+				gVal: document.getElementById('gVal'),
+				bdVal: document.getElementById('bdVal'),
+				fsVal: document.getElementById('fsVal'),
+				stVal: document.getElementById('stVal'),
+
+				reset: document.getElementById('reset'),
+				play: document.getElementById('play'),
+				ff: document.getElementById('ff')
+			};
+
+			function hypot(x, y){ return Math.hypot(x, y); }
+			function randUnit(){
+				const a = Math.random() * Math.PI * 2;
+				return { x: Math.cos(a), y: Math.sin(a) };
+			}
+
+			const state = {
+				playing: false,
+				started: false,
+				last: performance.now(),
+
+				stepTimerMs: 0,
+				spawnAccumulator: 0,
+
+				molecules: [],
+				seeker: null,
+				trail: [],
+				trailMax: 40,
+
+				fastForward: false,
+
+				foundIt: false,
+				stepCount: 0
+			};
+
+			function readParams(){
+				const p = {
+					RD: +ui.rd.value,
+					HS: +ui.hs.value,
+					HM: +ui.hm.value,
+					RR: +ui.rr.value,
+					G: +ui.g.value,
+					BD: +ui.bd.value,
+					FS: +ui.fs.value,
+					ST: +ui.st.value
+				};
+
+				ui.rdVal.textContent = p.RD.toFixed(0);
+				ui.hsVal.textContent = p.HS.toFixed(1);
+				ui.hmVal.textContent = p.HM.toFixed(1);
+				ui.rrVal.textContent = p.RR.toFixed(1);
+				ui.gVal.textContent = p.G.toFixed(1);
+				ui.bdVal.textContent = p.BD.toFixed(1);
+				ui.fsVal.textContent = p.FS.toFixed(0);
+				ui.stVal.textContent = p.ST.toFixed(0);
+
+				return p;
+			}
+
+			function field(){
+				const p = readParams();
+				return { cx: 450, cy: 450, r: p.FS / 2, d: p.FS, p };
+			}
+
+			function resetAll(){
+				state.playing = false;
+				state.started = false;
+				state.stepTimerMs = 0;
+				state.spawnAccumulator = 0;
+				state.molecules = [];
+				state.seeker = null;
+				state.trail = [];
+				state.fastForward = false;
+				state.foundIt = false;
+				state.stepCount = 0;
+				ui.ff.textContent = 'Fast‑Forward ×10';
+			}
+
+			function clampEntitiesToField(){
+				const f = field();
+				state.molecules = state.molecules.filter(m => hypot(m.x - f.cx, m.y - f.cy) <= f.r);
+				if(state.seeker){
+					const ds = hypot(state.seeker.x - f.cx, state.seeker.y - f.cy);
+					if(ds > f.r && ds > 1e-9){
+						const dx = state.seeker.x - f.cx;
+						const dy = state.seeker.y - f.cy;
+						state.seeker.x = f.cx + (dx / ds) * f.r;
+						state.seeker.y = f.cy + (dy / ds) * f.r;
+					}
+				}
+			}
+
+			ui.reset.addEventListener('click', () => resetAll());
+			ui.play.addEventListener('click', () => {
+				state.playing = !state.playing;
+				if(state.playing) state.started = true;
+			});
+			ui.ff.addEventListener('click', () => {
+				state.fastForward = !state.fastForward;
+				ui.ff.textContent = state.fastForward ? 'Fast‑Forward ON' : 'Fast‑Forward ×10';
+			});
+
+			for(const k of ['rd','hs','hm','rr','g','bd','fs','st']){
+				ui[k].addEventListener('input', () => clampEntitiesToField());
+			}
+
+			function canvasToLocal(evt){
+				const rect = canvas.getBoundingClientRect();
+				const scaleX = canvas.width / rect.width;
+				const scaleY = canvas.height / rect.height;
+				return {
+					x: (evt.clientX - rect.left) * scaleX,
+					y: (evt.clientY - rect.top) * scaleY
+				};
+			}
+
+			canvas.addEventListener('pointerdown', (evt) => {
+				const f = field();
+				const pos = canvasToLocal(evt);
+				if(hypot(pos.x - f.cx, pos.y - f.cy) > f.r) return;
+
+				state.seeker = { x: pos.x, y: pos.y };
+				state.trail = [{ x: pos.x, y: pos.y }];
+				state.started = true;
+				state.playing = true;
+
+				// new run resets win state + step counter
+				state.foundIt = false;
+				state.stepCount = 0;
+			});
+
+			function spawnMolecule(){
+				const f = field();
+				state.molecules.push({ x: f.cx, y: f.cy });
+			}
+
+			function stepMoleculesOnce(){
+				const f = field();
+				const stepLen = f.p.HM;
+				for(const m of state.molecules){
+					const u = randUnit();
+					m.x += u.x * stepLen;
+					m.y += u.y * stepLen;
+				}
+				// cull at boundary
+				state.molecules = state.molecules.filter(m => hypot(m.x - f.cx, m.y - f.cy) <= f.r);
+			}
+
+			function seekerStepVector(){
+				const f = field();
+				if(!state.seeker) return { x: 0, y: 0 };
+
+				const sx = state.seeker.x;
+				const sy = state.seeker.y;
+				const RD = f.p.RD;
+				const HS = f.p.HS;
+				const G = f.p.G;
+				const BD = f.p.BD;
+
+				// component 1: random walk
+				const ru = randUnit();
+				let vx = ru.x * HS;
+				let vy = ru.y * HS;
+				let count = 1;
+
+				// component 2: inverse-distance attraction to molecules within RD
+				for(const m of state.molecules){
+					const dx = m.x - sx;
+					const dy = m.y - sy;
+					const d = hypot(dx, dy);
+					if(d <= 1e-9) continue;
+					if(d <= RD){
+						const mag = (G <= 0) ? 0 : (G / d);
+						vx += (dx / d) * mag;
+						vy += (dy / d) * mag;
+						count += 1;
+					}
+				}
+
+				// component 3: distance-squared attraction to the blue dot (center), within blueRange = RD*BD
+				// magC scaled so that magC = G at cd = blueRange
+				const cdx = f.cx - sx;
+				const cdy = f.cy - sy;
+				const cd = hypot(cdx, cdy);
+				const blueRange = RD * BD;
+				if(cd > 1e-9 && cd <= blueRange){
+					const magC = (G <= 0) ? 0 : (G * (cd * cd) / (blueRange * blueRange));
+					vx += (cdx / cd) * magC;
+					vy += (cdy / cd) * magC;
+					count += 1;
+				}
+
+				vx /= count;
+				vy /= count;
+
+				return { x: vx, y: vy };
+			}
+
+			function stepSeekerOnce(){
+				const f = field();
+				if(!state.seeker) return;
+
+				const v = seekerStepVector();
+				state.seeker.x += v.x;
+				state.seeker.y += v.y;
+
+				state.stepCount += 1;
+
+				// keep seeker inside field
+				const dx = state.seeker.x - f.cx;
+				const dy = state.seeker.y - f.cy;
+				const d = hypot(dx, dy);
+				if(d > f.r){
+					state.seeker.x = f.cx + (dx / d) * f.r;
+					state.seeker.y = f.cy + (dy / d) * f.r;
+				}
+
+				state.trail.unshift({ x: state.seeker.x, y: state.seeker.y });
+				if(state.trail.length > state.trailMax) state.trail.length = state.trailMax;
+
+				// win condition: stop when within field diameter / 50 of the center
+				const winDist = f.d / 50;
+				const dc = hypot(state.seeker.x - f.cx, state.seeker.y - f.cy);
+				if(dc <= winDist){
+					state.playing = false;
+					state.foundIt = true;
+				}
+			}
+
+			function effectiveStepMs(f){
+				if(state.fastForward){
+					// 10× faster than the slider's smallest value
+					return Math.max(1, MIN_STEP_MS / 10);
+				}
+				return f.p.ST;
+			}
+
+			function step(dtSeconds){
+				if(!state.started || !state.playing) return;
+				const f = field();
+
+				// spawn molecules at RR per second (real-time)
+				state.spawnAccumulator += dtSeconds * f.p.RR;
+				while(state.spawnAccumulator >= 1){
+					spawnMolecule();
+					state.spawnAccumulator -= 1;
+				}
+
+				// advance discrete simulation steps
+				state.stepTimerMs += dtSeconds * 1000;
+				const eff = effectiveStepMs(f);
+				while(state.stepTimerMs >= eff){
+					stepMoleculesOnce();
+					stepSeekerOnce();
+					state.stepTimerMs -= eff;
+				}
+			}
+
+			function draw(){
+				ctx.clearRect(0, 0, canvas.width, canvas.height);
+				const f = field();
+
+				// field circle
+				ctx.beginPath();
+				ctx.arc(f.cx, f.cy, f.r, 0, Math.PI * 2);
+				ctx.fillStyle = 'rgba(150, 200, 140, 0.60)';
+				ctx.fill();
+
+				// center dot
+				ctx.beginPath();
+				ctx.arc(f.cx, f.cy, 6, 0, Math.PI * 2);
+				ctx.fillStyle = '#1f3aa8';
+				ctx.fill();
+
+				// molecules
+				ctx.fillStyle = '#111';
+				for(const m of state.molecules){
+					ctx.beginPath();
+					ctx.arc(m.x, m.y, 2.2, 0, Math.PI * 2);
+					ctx.fill();
+				}
+
+				// trail as solid line
+				if(state.trail.length >= 2){
+					ctx.beginPath();
+					ctx.moveTo(state.trail[0].x, state.trail[0].y);
+					for(let i = 1; i < state.trail.length; i++){
+						ctx.lineTo(state.trail[i].x, state.trail[i].y);
+					}
+					ctx.strokeStyle = 'rgba(220, 30, 30, 0.85)';
+					ctx.lineWidth = 4;
+					ctx.lineCap = 'round';
+					ctx.lineJoin = 'round';
+					ctx.stroke();
+				}
+
+				// seeker
+				if(state.seeker){
+					ctx.beginPath();
+					ctx.arc(state.seeker.x, state.seeker.y, 6.5, 0, Math.PI * 2);
+					ctx.fillStyle = '#e21c1c';
+					ctx.fill();
+				}
+
+				// boundary stroke
+				ctx.beginPath();
+				ctx.arc(f.cx, f.cy, f.r, 0, Math.PI * 2);
+				ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+				ctx.lineWidth = 2;
+				ctx.stroke();
+
+				// win message (below center, not on top of blue dot)
+				if(state.foundIt){
+					const winDist = f.d / 50;
+					let tx = f.cx;
+					let ty = f.cy + winDist + 58;
+
+					// keep text inside green circle
+					const maxY = f.cy + f.r - 60;
+					ty = Math.min(ty, maxY);
+
+					ctx.fillStyle = '#111';
+					ctx.textAlign = 'center';
+					ctx.textBaseline = 'middle';
+
+					ctx.font = '68px ' + getComputedStyle(document.body).fontFamily;
+					ctx.fillText('Found It!', tx, ty);
+
+					ctx.font = '48px ' + getComputedStyle(document.body).fontFamily;
+					ctx.fillText(state.stepCount + ' steps', tx, ty + 58);
+
+					ctx.textAlign = 'start';
+					ctx.textBaseline = 'alphabetic';
+				}
+			}
+
+			function runTests(){
+				console.assert(ui.rd && ui.hs && ui.hm && ui.rr && ui.g && ui.bd && ui.fs && ui.st, 'UI sliders missing');
+				console.assert(MIN_STEP_MS === 50, 'MIN_STEP_MS must match Step Time slider min');
+				const f = field();
+				console.assert(Number.isFinite(f.r) && f.r > 0, 'Field radius invalid');
+
+				// molecule stepping doesn’t create NaN
+				state.molecules = [{ x: f.cx, y: f.cy }];
+				stepMoleculesOnce();
+				console.assert(Number.isFinite(state.molecules[0].x) && Number.isFinite(state.molecules[0].y), 'Molecule step invalid');
+				state.molecules = [];
+			}
+
+			function tick(tNow){
+				const dt = Math.min(0.05, (tNow - state.last) / 1000);
+				state.last = tNow;
+				step(dt);
+				draw();
+				requestAnimationFrame(tick);
+			}
+
+			resetAll();
+			runTests();
+			requestAnimationFrame(tick);
+		})();
+	</script>
+</body>
+</html>
